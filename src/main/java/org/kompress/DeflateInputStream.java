@@ -3,6 +3,7 @@ package org.kompress;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Arrays;
 
 /**
  * Decompresses using the
@@ -72,16 +73,85 @@ public class DeflateInputStream extends InputStream {
           int read = compressed.read();
           if (read == -1) {
             state.inBlock = false;
-            state.finished = true;
+            state.finished = state.lastBlock;
             return;
           }
           history.write((byte) (read & 0xff));
         }
         break;
       case FIXED:
-        throw new UnsupportedOperationException();
+        // A single DEFLATE code can create
+        // up to 258 bytes in the output.
+        while (history.maxWrite() > 258) {
+          int llCode = decode(state.lenLitDecoder);
+          assert llCode <= 285;
+
+          if (llCode < 256) {
+            history.write((byte) (llCode & 0xff));
+          } else if (llCode == 256) {
+            // 256 is DEFLATE's sentinel value for
+            // ending the current compressed block.
+            state.inBlock = false;
+            state.finished = state.lastBlock;
+            return;
+          } else {
+
+            final int length;
+            if (llCode < 265) {
+              length = llCode - (257 - 3);
+            } else if (llCode < 269) {
+              length = llCode * 2 - (265 * 2 - 11) + bits(1);
+            } else if (llCode < 273) {
+              length = llCode * 4 - (269 * 4 - 19) + bits(2);
+            } else if (llCode < 277) {
+              length = llCode * 8 - (273 * 8 - 35) + bits(3);
+            } else if (llCode < 281) {
+              length = llCode * 16 - (277 * 16 - 67) + bits(4);
+            } else if (llCode < 285) {
+              length = llCode * 32 - (281 * 32 - 131) + bits(5);
+            } else if (llCode == 285) {
+              length = 258;
+            } else {
+              throw new AssertionError();
+            }
+
+            int dCode = decode(state.distDecoder);
+            final int distance;
+
+            if (dCode < 4) {
+              distance = dCode + 1;
+            } else {
+              int nb = (dCode - 2) >> 1;
+              int extra = (dCode & 1) << nb;
+              extra |= bits(nb);
+              distance = (1 << (nb + 1)) + 1 + extra;
+            }
+
+            history.lookback(length, distance);
+          }
+        }
+        break;
       case DYNAMIC:
         throw new UnsupportedOperationException();
+    }
+  }
+
+  private int decode(Decoder decoder) throws IOException {
+    int n = decoder.minCodeLen;
+
+    while (true) {
+      while (state.nbits < n) {
+        readByte();
+      }
+
+      Code code = decoder.table[state.bits & decoder.tableMask];
+      n = code.nbits;
+
+      if (n <= state.nbits) {
+        state.nbits -= code.nbits;
+        state.bits = state.bits >>> code.nbits;
+        return code.value;
+      }
     }
   }
 
@@ -90,7 +160,27 @@ public class DeflateInputStream extends InputStream {
   }
 
   private void initFixed() {
-    throw new UnsupportedOperationException();
+
+    Code[] distanceTable = new Code[30];
+    for (int i = 0; i < distanceTable.length; i++) {
+      distanceTable[i] = new Code(i, 5);
+    }
+
+    Code[] lenLitTable = new Code[286];
+    for (int i = 0; i < lenLitTable.length; i++) {
+      if (i < 144) {
+        lenLitTable[i] = new Code(i, 8);
+      } else if (i < 256) {
+        lenLitTable[i] = new Code(i, 9);
+      } else if (i < 280) {
+        lenLitTable[i] = new Code(i, 7);
+      } else {
+        lenLitTable[i] = new Code(i, 8);
+      }
+    }
+
+    state.distDecoder = new Decoder(distanceTable);
+    state.lenLitDecoder = new Decoder(lenLitTable);
   }
 
   private void initUncompressed() throws IOException {
@@ -123,16 +213,20 @@ public class DeflateInputStream extends InputStream {
   private int bits(int n) throws IOException {
     assert n > 0 && n < 17;
     while (state.nbits < n) {
-      int read = compressed.read();
-      if (read == -1) throw new EOFException();
-      state.bits = state.bits | (read << state.nbits);
-      state.nbits += 8;
+      readByte();
     }
 
     int ret = keepLastNBits(state.bits, n);
     state.bits = state.bits >> n;
     state.nbits -= n;
     return ret;
+  }
+
+  private void readByte() throws IOException {
+    int read = compressed.read();
+    if (read == -1) throw new EOFException();
+    state.bits = state.bits | (read << state.nbits);
+    state.nbits += 8;
   }
 
   private int keepLastNBits(int value, int n) {
@@ -151,6 +245,8 @@ public class DeflateInputStream extends InputStream {
     boolean lastBlock = false;
     boolean inBlock = false;
     BlockType blockType = null;
+    Decoder lenLitDecoder = null;
+    Decoder distDecoder = null;
   }
 
   private static class CircularByteBuffer {
@@ -198,6 +294,72 @@ public class DeflateInputStream extends InputStream {
       int writeIndex = nextWrite;
       nextWrite = (nextWrite + 1) & mask;
       bytes[writeIndex] = b;
+    }
+
+    public void lookback(int length, int distance) {
+      int p = distance >= nextWrite
+          ? capacity - (distance - nextWrite)
+          : nextWrite - distance;
+      for (int i = 0; i < length; i++) {
+        write(bytes[p & mask]);
+        p++;
+      }
+    }
+  }
+
+  private static class Decoder {
+    final Code[] table;
+    final int minCodeLen;
+    final int maxCodeLen;
+    final int tableMask;
+
+    Decoder(Code[] codeLens) {
+      Arrays.sort(codeLens);
+      minCodeLen = codeLens[0].nbits;
+      maxCodeLen = codeLens[codeLens.length - 1].nbits;
+      table = new Code[1 << maxCodeLen];
+      tableMask = (1 << maxCodeLen) - 1;
+      int codeIndex = 0;
+      int currBitCode = 0;
+      for (int bitLen = 0; bitLen < 16; bitLen++) {
+        while (codeIndex < codeLens.length && codeLens[codeIndex].nbits == bitLen) {
+          Code code = codeLens[codeIndex];
+          int reversed = Integer.reverse(currBitCode) >>> (32 - code.nbits);
+          table[reversed] = code;
+          if (code.nbits < maxCodeLen) {
+            int numPads = 1 << (maxCodeLen - code.nbits);
+            for (int i = 1; i < numPads; i++) {
+              table[reversed | i << code.nbits] = code;
+            }
+          }
+          currBitCode++;
+          codeIndex++;
+        }
+        currBitCode <<= 1;
+      }
+    }
+  }
+
+  private static class Code implements Comparable<Code> {
+
+    final int value;
+    final int nbits;
+
+    private Code(int value, int nbits) {
+      this.value = value;
+      this.nbits = nbits;
+    }
+
+    @Override
+    public int compareTo(Code o) {
+      if (nbits < o.nbits) {
+        return -1;
+      } else if (nbits > o.nbits) {
+        return 1;
+      } else {
+        assert value != o.value;
+        return Integer.compare(value, o.value);
+      }
     }
   }
 }

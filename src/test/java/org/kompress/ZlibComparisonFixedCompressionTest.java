@@ -7017,10 +7017,6 @@ public class ZlibComparisonFixedCompressionTest {
   }
 
   private void check(byte[] uncompressed, byte[] compressed) {
-    try {
-      assertArrayEquals(Deflate.decompress(compressed), uncompressed);
-    } catch (UnsupportedOperationException expected) {
-
-    }
+    assertArrayEquals(uncompressed, Deflate.decompress(compressed));
   }
 }
