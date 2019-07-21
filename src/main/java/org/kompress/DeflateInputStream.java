@@ -3,7 +3,9 @@ package org.kompress;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * Decompresses using the
@@ -80,6 +82,7 @@ public class DeflateInputStream extends InputStream {
         }
         break;
       case FIXED:
+      case DYNAMIC:
         // A single DEFLATE code can create
         // up to 258 bytes in the output.
         while (history.maxWrite() > 258) {
@@ -130,9 +133,6 @@ public class DeflateInputStream extends InputStream {
             history.lookback(length, distance);
           }
         }
-        break;
-      case DYNAMIC:
-        throw new UnsupportedOperationException();
     }
   }
 
@@ -155,8 +155,58 @@ public class DeflateInputStream extends InputStream {
     }
   }
 
-  private void initDynamic() {
-    throw new UnsupportedOperationException();
+  private void initDynamic() throws IOException {
+    int hlit = bits(5);
+    int hdist = bits(5);
+    int hclen = bits(4);
+
+    List<Code> codeLenAlphabet = new ArrayList<>();
+
+    int[] codingIndex = {16, 17, 18,
+        0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
+
+    for (int i = 0; i < hclen + 4; i++) {
+      int codeLen = bits(3);
+      if (codeLen > 0) {
+        codeLenAlphabet.add(new Code(codingIndex[i], codeLen));
+      }
+    }
+
+    Decoder headerDecoder = new Decoder(codeLenAlphabet.toArray(new Code[]{}));
+
+    Code[] codeLengths = new Code[hlit + hdist + 258];
+
+    for (int i = 0; i < codeLengths.length; i++) {
+      int decoded = decode(headerDecoder);
+
+      if (decoded < 16) {
+        codeLengths[i] = new Code(i % (hlit  + 257), decoded);
+        continue;
+      }
+
+      int repeatLen;
+      int repeatVal;
+      if (decoded == 16) {
+        repeatLen = 3 + bits(2);
+        repeatVal = codeLengths[i - 1].nbits;
+      } else if (decoded == 17) {
+        repeatLen = 3 + bits(3);
+        repeatVal = 0;
+      } else if (decoded == 18) {
+        repeatLen = 11 + bits(7);
+        repeatVal = 0;
+      } else {
+        throw new AssertionError();
+      }
+
+      for(int j = 0; j < repeatLen; j++) {
+        codeLengths[i + j] = new Code((i + j) % (hlit  + 257), repeatVal);
+      }
+      i += repeatLen - 1;
+    }
+
+    state.lenLitDecoder = new Decoder(Arrays.copyOf(codeLengths, hlit + 257));
+    state.distDecoder = new Decoder(Arrays.copyOfRange(codeLengths, hlit + 257, codeLengths.length));
   }
 
   private void initFixed() {
@@ -315,11 +365,14 @@ public class DeflateInputStream extends InputStream {
 
     Decoder(Code[] codeLens) {
       Arrays.sort(codeLens);
-      minCodeLen = codeLens[0].nbits;
+      int codeIndex = 0;
+      while(codeIndex < codeLens.length && codeLens[codeIndex].nbits == 0) {
+        codeIndex++;
+      }
+      minCodeLen = codeLens[codeIndex].nbits;
       maxCodeLen = codeLens[codeLens.length - 1].nbits;
       table = new Code[1 << maxCodeLen];
       tableMask = (1 << maxCodeLen) - 1;
-      int codeIndex = 0;
       int currBitCode = 0;
       for (int bitLen = 0; bitLen < 16; bitLen++) {
         while (codeIndex < codeLens.length && codeLens[codeIndex].nbits == bitLen) {

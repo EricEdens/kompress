@@ -7018,10 +7018,6 @@ public class ZlibComparisonDynamicCompressionTest {
 
 
   private void check(byte[] uncompressed, byte[] compressed) {
-    try {
-      assertArrayEquals(Deflate.decompress(compressed), uncompressed);
-    } catch (UnsupportedOperationException expected) {
-
-    }
+    assertArrayEquals(Deflate.decompress(compressed), uncompressed);
   }
 }
