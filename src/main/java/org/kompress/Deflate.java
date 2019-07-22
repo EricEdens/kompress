@@ -9,7 +9,6 @@ import java.util.zip.Inflater;
 public class Deflate {
 
   public static byte[] decompress(byte[] compressed) {
-    Inflater inflater = new Inflater(true);
     InputStream input = new DeflateInputStream(new ByteArrayInputStream(compressed));
     ByteArrayOutputStream output = new ByteArrayOutputStream();
 

@@ -71,14 +71,17 @@ public class DeflateInputStream extends InputStream {
 
     switch (state.blockType) {
       case NONE:
-        while (history.maxWrite() > 0) {
+        while (history.maxWrite() > 0 && state.uncompressedLen > 0) {
           int read = compressed.read();
           if (read == -1) {
-            state.inBlock = false;
-            state.finished = state.lastBlock;
-            return;
+            throw new EOFException();
           }
           history.write((byte) (read & 0xff));
+          state.uncompressedLen--;
+        }
+        if (state.uncompressedLen == 0) {
+          state.inBlock = false;
+          state.finished = state.lastBlock;
         }
         break;
       case FIXED:
