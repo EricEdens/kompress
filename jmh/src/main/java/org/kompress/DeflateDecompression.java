@@ -11,6 +11,7 @@ import org.openjdk.jmh.runner.options.OptionsBuilder;
 
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.concurrent.TimeUnit;
@@ -21,7 +22,26 @@ import java.util.zip.InflaterInputStream;
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 public class DeflateDecompression {
 
-  private static final byte[] compressed = byteArray(0x25, 0x8a, 0xb1, 0x01, 0x00, 0x00, 0x0c, 0xc1, 0x6e, 0x95, 0xfc, 0xff, 0x43, 0xb5, 0xb5, 0x10, 0x98, 0x40, 0x2a, 0x72, 0xf6, 0x09, 0xe3, 0x83, 0x6d, 0x4b, 0x37, 0xb2, 0x1f, 0x07);
+  private static final byte[] compressed =
+    readBytes(DeflateDecompression.class.getClassLoader().getResourceAsStream("zopflibig"));
+
+  private static byte[] readBytes(InputStream inputStream) {
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+    while (true) {
+      int read;
+      try {
+        read = inputStream.read();
+      } catch (IOException e) {
+        throw new RuntimeException(e);
+      }
+      if (read == -1) {
+        break;
+      }
+      out.write(read);
+    }
+    return out.toByteArray();
+  }
 
   @Benchmark
   public int kompress() throws IOException {
