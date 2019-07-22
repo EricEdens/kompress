@@ -3,9 +3,7 @@ package org.kompress;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 
 /**
  * Decompresses using the
@@ -147,13 +145,13 @@ public class DeflateInputStream extends InputStream {
         readByte();
       }
 
-      Code code = decoder.table[state.bits & decoder.tableMask];
-      n = code.nbits;
+      int code = decoder.table[state.bits & decoder.tableMask];
+      n = getNbits(code);
 
       if (n <= state.nbits) {
-        state.nbits -= code.nbits;
-        state.bits = state.bits >>> code.nbits;
-        return code.value;
+        state.nbits -= getNbits(code);
+        state.bits = state.bits >>> getNbits(code);
+        return getValue(code);
       }
     }
   }
@@ -163,27 +161,25 @@ public class DeflateInputStream extends InputStream {
     int hdist = bits(5);
     int hclen = bits(4);
 
-    List<Code> codeLenAlphabet = new ArrayList<>();
+    int[] codeLenAlphabet = new int[hclen + 4];
 
     int[] codingIndex = {16, 17, 18,
-        0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
+      0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
 
-    for (int i = 0; i < hclen + 4; i++) {
+    for (int i = 0; i < codeLenAlphabet.length; i++) {
       int codeLen = bits(3);
-      if (codeLen > 0) {
-        codeLenAlphabet.add(new Code(codingIndex[i], codeLen));
-      }
+      codeLenAlphabet[i] = createCode(codingIndex[i], codeLen);
     }
 
-    Decoder headerDecoder = new Decoder(codeLenAlphabet.toArray(new Code[]{}));
+    Decoder headerDecoder = new Decoder(codeLenAlphabet);
 
-    Code[] codeLengths = new Code[hlit + hdist + 258];
+    int[] codeLengths = new int[hlit + hdist + 258];
 
     for (int i = 0; i < codeLengths.length; i++) {
       int decoded = decode(headerDecoder);
 
       if (decoded < 16) {
-        codeLengths[i] = new Code(i % (hlit  + 257), decoded);
+        codeLengths[i] = createCode(i % (hlit + 257), decoded);
         continue;
       }
 
@@ -191,7 +187,7 @@ public class DeflateInputStream extends InputStream {
       int repeatVal;
       if (decoded == 16) {
         repeatLen = 3 + bits(2);
-        repeatVal = codeLengths[i - 1].nbits;
+        repeatVal = getNbits(codeLengths[i - 1]);
       } else if (decoded == 17) {
         repeatLen = 3 + bits(3);
         repeatVal = 0;
@@ -202,8 +198,8 @@ public class DeflateInputStream extends InputStream {
         throw new AssertionError();
       }
 
-      for(int j = 0; j < repeatLen; j++) {
-        codeLengths[i + j] = new Code((i + j) % (hlit  + 257), repeatVal);
+      for (int j = 0; j < repeatLen; j++) {
+        codeLengths[i + j] = createCode((i + j) % (hlit + 257), repeatVal);
       }
       i += repeatLen - 1;
     }
@@ -214,21 +210,21 @@ public class DeflateInputStream extends InputStream {
 
   private void initFixed() {
 
-    Code[] distanceTable = new Code[30];
+    int[] distanceTable = new int[30];
     for (int i = 0; i < distanceTable.length; i++) {
-      distanceTable[i] = new Code(i, 5);
+      distanceTable[i] = createCode(i, 5);
     }
 
-    Code[] lenLitTable = new Code[286];
+    int[] lenLitTable = new int[286];
     for (int i = 0; i < lenLitTable.length; i++) {
       if (i < 144) {
-        lenLitTable[i] = new Code(i, 8);
+        lenLitTable[i] = createCode(i, 8);
       } else if (i < 256) {
-        lenLitTable[i] = new Code(i, 9);
+        lenLitTable[i] = createCode(i, 9);
       } else if (i < 280) {
-        lenLitTable[i] = new Code(i, 7);
+        lenLitTable[i] = createCode(i, 7);
       } else {
-        lenLitTable[i] = new Code(i, 8);
+        lenLitTable[i] = createCode(i, 8);
       }
     }
 
@@ -351,8 +347,8 @@ public class DeflateInputStream extends InputStream {
 
     public void lookback(int length, int distance) {
       int p = distance >= nextWrite
-          ? capacity - (distance - nextWrite)
-          : nextWrite - distance;
+        ? capacity - (distance - nextWrite)
+        : nextWrite - distance;
       for (int i = 0; i < length; i++) {
         write(bytes[p & mask]);
         p++;
@@ -361,31 +357,31 @@ public class DeflateInputStream extends InputStream {
   }
 
   private static class Decoder {
-    final Code[] table;
+    final int[] table;
     final int minCodeLen;
     final int maxCodeLen;
     final int tableMask;
 
-    Decoder(Code[] codeLens) {
+    Decoder(int[] codeLens) {
       Arrays.sort(codeLens);
       int codeIndex = 0;
-      while(codeIndex < codeLens.length && codeLens[codeIndex].nbits == 0) {
+      while (codeIndex < codeLens.length && getNbits(codeLens[codeIndex]) == 0) {
         codeIndex++;
       }
-      minCodeLen = codeLens[codeIndex].nbits;
-      maxCodeLen = codeLens[codeLens.length - 1].nbits;
-      table = new Code[1 << maxCodeLen];
+      minCodeLen = getNbits(codeLens[codeIndex]);
+      maxCodeLen = getNbits(codeLens[codeLens.length - 1]);
+      table = new int[1 << maxCodeLen];
       tableMask = (1 << maxCodeLen) - 1;
       int currBitCode = 0;
       for (int bitLen = 0; bitLen < 16; bitLen++) {
-        while (codeIndex < codeLens.length && codeLens[codeIndex].nbits == bitLen) {
-          Code code = codeLens[codeIndex];
-          int reversed = Integer.reverse(currBitCode) >>> (32 - code.nbits);
+        while (codeIndex < codeLens.length && getNbits(codeLens[codeIndex]) == bitLen) {
+          int code = codeLens[codeIndex];
+          int reversed = Integer.reverse(currBitCode) >>> (32 - getNbits(code));
           table[reversed] = code;
-          if (code.nbits < maxCodeLen) {
-            int numPads = 1 << (maxCodeLen - code.nbits);
+          if (getNbits(code) < maxCodeLen) {
+            int numPads = 1 << (maxCodeLen - getNbits(code));
             for (int i = 1; i < numPads; i++) {
-              table[reversed | i << code.nbits] = code;
+              table[reversed | i << getNbits(code)] = code;
             }
           }
           currBitCode++;
@@ -396,26 +392,15 @@ public class DeflateInputStream extends InputStream {
     }
   }
 
-  private static class Code implements Comparable<Code> {
+  public static int getValue(int code) {
+    return code & 0xffff;
+  }
 
-    final int value;
-    final int nbits;
+  public static int getNbits(int code) {
+    return code >>> 16;
+  }
 
-    private Code(int value, int nbits) {
-      this.value = value;
-      this.nbits = nbits;
-    }
-
-    @Override
-    public int compareTo(Code o) {
-      if (nbits < o.nbits) {
-        return -1;
-      } else if (nbits > o.nbits) {
-        return 1;
-      } else {
-        assert value != o.value;
-        return Integer.compare(value, o.value);
-      }
-    }
+  private static int createCode(int value, int nbits) {
+    return ((nbits & 0xffff) << 16) | (value & 0xffff);
   }
 }
